@@ -1,0 +1,60 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: remote-print
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: backend } }
+  template:
+    metadata: { labels: { app: backend } }
+    spec:
+      containers:
+        - name: backend
+          image: remote-print-backend:local
+          imagePullPolicy: IfNotPresent
+          ports: [ { containerPort: 3000 } ]
+          env:
+            - name: DB_HOST
+              valueFrom: { configMapKeyRef: { name: backend-config, key: DB_HOST } }
+            - name: DB_PORT
+              valueFrom: { configMapKeyRef: { name: backend-config, key: DB_PORT } }
+            - name: DB_NAME
+              valueFrom: { configMapKeyRef: { name: backend-config, key: DB_NAME } }
+            - name: DB_USER
+              valueFrom: { configMapKeyRef: { name: backend-config, key: DB_USER } }
+            - name: JWT_EXPIRE_MINUTES
+              valueFrom: { configMapKeyRef: { name: backend-config, key: JWT_EXPIRE_MINUTES } }
+            - name: ENABLE_IPP
+              valueFrom: { configMapKeyRef: { name: backend-config, key: ENABLE_IPP } }
+            - name: PRINTER_URI
+              valueFrom: { configMapKeyRef: { name: backend-config, key: PRINTER_URI } }
+            - name: PRINTER_NAME
+              valueFrom: { configMapKeyRef: { name: backend-config, key: PRINTER_NAME } }
+            - name: DB_PASSWORD
+              valueFrom: { secretKeyRef: { name: postgres-secret, key: POSTGRES_PASSWORD } }
+            - name: SECRET_KEY
+              valueFrom: { secretKeyRef: { name: postgres-secret, key: SECRET_KEY } }
+          readinessProbe:
+            httpGet: { path: /readyz, port: 3000 }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: 3000 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          volumeMounts:
+            - name: uploads
+              mountPath: /data/uploads
+      volumes:
+        - name: uploads
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  namespace: remote-print
+spec:
+  selector: { app: backend }
+  ports: [ { port: 3000, targetPort: 3000 } ]

@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Remote Print – Canon TS5100</title>
+<style>
+body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;max-width:720px;margin:2rem auto;padding:0 1rem}
+.card{border:1px solid #ddd;border-radius:12px;padding:1rem 1.25rem;box-shadow:0 2px 10px rgba(0,0,0,.05);margin-bottom:1rem}
+h1{margin:0 0 .25rem}h2{margin-top:0}label{display:block;margin-top:.75rem}
+input[type="text"],input[type="password"]{width:100%;padding:.5rem;border:1px solid #ccc;border-radius:8px}
+input[type="file"]{margin-top:.5rem}button{padding:.6rem 1rem;border:0;background:#0d6efd;color:#fff;border-radius:10px;cursor:pointer}
+button.secondary{background:#6c757d}.muted{color:#666;font-size:.95rem}.row{display:flex;gap:1rem;align-items:center}
+.row>*{flex:1}.jobs{font-family:ui-monospace,Menlo,Consolas,monospace;background:#fafafa;border:1px dashed #ddd;padding:.5rem .75rem;border-radius:8px}
+.hidden{display:none}
+</style></head>
+<body>
+<div class="card"><h1>Remote Print</h1><div class="muted">Canon TS5100 – 3-tier demo (Kubernetes)</div></div>
+<div id="auth" class="card"><h2>Login</h2><div class="row">
+<div><label>Username <input id="username" type="text" placeholder="alice"/></label></div>
+<div><label>Password <input id="password" type="password" placeholder="••••••••"/></label></div>
+</div><div style="margin-top:.75rem;display:flex;gap:.5rem;">
+<button id="loginBtn">Login</button><button class="secondary" id="registerBtn" title="Quickly create a user for testing">Register</button>
+</div><div id="authMsg" class="muted"></div></div>
+<div id="app" class="card hidden"><h2>Print a document</h2>
+<div class="muted">In mock mode jobs auto-complete in ~2s. For real IPP, see README.</div>
+<label>Choose file <input id="fileInput" type="file"/></label>
+<div style="margin-top:.75rem;"><button id="printBtn">Print</button><button class="secondary" id="logoutBtn">Logout</button></div>
+<div id="printMsg" class="muted"></div></div>
+<div id="jobsCard" class="card hidden"><h2>Job status</h2><pre class="jobs" id="jobs"></pre></div>
+<script>
+const authEl=document.getElementById('auth'),appEl=document.getElementById('app'),jobsCard=document.getElementById('jobsCard'),jobsPre=document.getElementById('jobs'),authMsg=document.getElementById('authMsg'),printMsg=document.getElementById('printMsg');
+function api(p,o={}){const t=localStorage.getItem('token');o.headers=o.headers||{};if(t)o.headers['Authorization']='Bearer '+t;return fetch('/api'+p,o);}
+function setAuthed(on){if(on){authEl.classList.add('hidden');appEl.classList.remove('hidden');jobsCard.classList.remove('hidden');}else{authEl.classList.remove('hidden');appEl.classList.add('hidden');jobsCard.classList.add('hidden');localStorage.removeItem('token');}}
+async function refreshMe(){const r=await api('/me');if(r.ok)setAuthed(true);else setAuthed(false);}
+async function pollJob(id){const r=await api('/jobs/'+id);if(!r.ok){printMsg.textContent='Failed to load job: '+(await r.text());return;}const j=await r.json();jobsPre.textContent=JSON.stringify(j,null,2)+'\n'+jobsPre.textContent;if(j.status==='queued'||j.status==='printing'){setTimeout(()=>pollJob(id),1500);}else{printMsg.textContent='Job '+id+' finished: '+j.status+(j.error?(' ('+j.error+')'):'');}}
+document.getElementById('loginBtn').onclick=async()=>{const u=document.getElementById('username').value.trim(),p=document.getElementById('password').value;const r=await api('/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:u,password:p})});if(r.ok){const {token}=await r.json();localStorage.setItem('token',token);authMsg.textContent='';setAuthed(true);}else authMsg.textContent='Login failed';};
+document.getElementById('registerBtn').onclick=async()=>{const u=document.getElementById('username').value.trim(),p=document.getElementById('password').value;const r=await api('/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:u,password:p})});authMsg.textContent=r.ok?'User created. You can log in now.':'Register failed (maybe user exists?)';};
+document.getElementById('logoutBtn').onclick=()=>setAuthed(false);
+document.getElementById('printBtn').onclick=async()=>{const f=document.getElementById('fileInput').files[0];if(!f){printMsg.textContent='Pick a file first.';return;}const fd=new FormData();fd.append('file',f);const r=await api('/print',{method:'POST',body:fd});if(r.ok){const {job_id}=await r.json();printMsg.textContent='Submitted job #'+job_id+', polling...';pollJob(job_id);}else{printMsg.textContent='Print failed: '+(await r.text());}};
+refreshMe();
+</script></body></html>

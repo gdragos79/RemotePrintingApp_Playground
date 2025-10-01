@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: backend-config
+  namespace: remote-print
+data:
+  DB_HOST: postgres
+  DB_PORT: "5432"
+  DB_NAME: printdb
+  DB_USER: printuser
+  JWT_EXPIRE_MINUTES: "240"
+  ENABLE_IPP: "false"
+  PRINTER_URI: ""
+  PRINTER_NAME: ""
