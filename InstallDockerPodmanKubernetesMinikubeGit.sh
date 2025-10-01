@@ -4,7 +4,6 @@ set -Eeuo pipefail
 # ===================== Helpers =====================
 
 yes_no() {
-  # Usage: if yes_no "Prompt? (y/n):"; then ...; fi
   local prompt="${1:-Are you sure? (y/n): }"
   local reply
   read -rp "$prompt " reply || true
@@ -13,7 +12,6 @@ yes_no() {
 }
 
 ask_default() {
-  # Usage: ask_default "Prompt" "default"
   local prompt="${1:?}"
   local def="${2:-}"
   local reply
@@ -27,8 +25,6 @@ ask_default() {
 }
 
 require() {
-  # Ensure a command exists, optionally installing a package for it
-  # Usage: require curl curl
   local cmd="$1"; local pkg="${2:-}"
   if ! command -v "$cmd" >/dev/null 2>&1; then
     if [[ -n "$pkg" ]]; then
@@ -42,7 +38,6 @@ require() {
 }
 
 docker_codename() {
-  # Map Ubuntu to a Docker-supported codename (handles odd codenames)
   . /etc/os-release
   case "${VERSION_ID:-}" in
     24.04*) echo "noble" ;;
@@ -62,6 +57,66 @@ detect_minikube_driver() {
   fi
 }
 
+# --- NEW: ensure we can talk to Docker daemon in this shell ---
+ensure_docker_access() {
+  echo
+  echo "Verifying Docker daemon access..."
+
+  # Is docker installed?
+  if ! command -v docker >/dev/null 2>&1; then
+    echo "Docker CLI not found. Skipping docker access checks."
+    return 0
+  fi
+
+  # Is user listed in docker group (in /etc/group)?
+  local listed_in_group="no"
+  if getent group docker | grep -qw "\b${USER}\b"; then
+    listed_in_group="yes"
+  fi
+
+  # Does this shell currently have docker group effective?
+  local in_group_now="no"
+  if id -nG "$USER" | grep -qw docker; then
+    in_group_now="yes"
+  fi
+
+  # Offer to add user to group if not listed
+  if [[ "$listed_in_group" == "no" ]]; then
+    echo "User '$USER' is NOT in the 'docker' group."
+    if yes_no "Add '$USER' to the 'docker' group now? (y/n):"; then
+      sudo groupadd docker 2>/dev/null || true
+      sudo usermod -aG docker "$USER"
+      echo "Added '$USER' to 'docker' group."
+      echo "➡ Open a NEW SSH session or run: newgrp docker"
+    else
+      echo "Skipping group add. Docker (and Minikube docker driver) may fail without sudo."
+    fi
+  fi
+
+  # If listed but not effective in this shell, advise newgrp
+  if [[ "$listed_in_group" == "yes" && "$in_group_now" == "no" ]]; then
+    echo "You are in 'docker' group, but this shell doesn't have it yet."
+    echo "➡ Run: newgrp docker    (or open a new SSH session)"
+  fi
+
+  # Ensure dockerd is running
+  if ! systemctl is-active --quiet docker; then
+    echo "Docker service is not active; attempting to start it..."
+    sudo systemctl start docker || true
+  fi
+
+  # Check socket permissions and basic connectivity
+  if [[ -S /var/run/docker.sock ]]; then
+    ls -l /var/run/docker.sock || true
+  fi
+  if ! docker info >/dev/null 2>&1; then
+    echo "Docker CLI cannot talk to the daemon yet."
+    echo "Try: newgrp docker; then test: docker run --rm hello-world"
+  else
+    echo "Docker daemon access OK."
+  fi
+}
+
 # ===================== Start =====================
 
 echo "Updating system package index..."
@@ -73,18 +128,15 @@ install_or_reinstall_docker() {
   require curl curl
   require gpg gnupg
 
-  # Clean any wrong/duplicate entries (e.g., debian/plucky)
   sudo rm -f \
     /etc/apt/sources.list.d/archive_uri-https_download_docker_com_linux_debian-*.list \
     /etc/apt/sources.list.d/docker.list
 
-  # Keyring
   sudo install -m 0755 -d /etc/apt/keyrings
   curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
     | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
   sudo chmod a+r /etc/apt/keyrings/docker.gpg
 
-  # Repo
   DOCKER_CODENAME="$(docker_codename)"
   echo "Using Docker repo codename: ${DOCKER_CODENAME}"
   echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu ${DOCKER_CODENAME} stable" \
@@ -168,12 +220,16 @@ install_or_reinstall_kubectl() {
   cd /tmp
   curl -fsSLO "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/${KARCH}/kubectl"
   sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
-  rm -f kubectl
-  echo "kubectl installed: $(kubectl version --client --short)"
+
+  echo "kubectl binary kept at: /tmp/kubectl"
+  echo "kubectl installed at: /usr/local/bin/kubectl"
+  echo "kubectl version:"
+  kubectl version --client || true
 }
 
 if command -v kubectl >/dev/null 2>&1; then
-  echo "kubectl is already installed: $(kubectl version --client --short || echo 'unknown')"
+  echo "kubectl is already installed:"
+  kubectl version --client || true
   if yes_no "Do you want to reinstall kubectl? (y/n):"; then
     install_or_reinstall_kubectl
   else
@@ -207,7 +263,6 @@ install_or_reinstall_minikube() {
 }
 
 minikube_driver_setup() {
-  # Choose driver
   local suggested; suggested="$(detect_minikube_driver)"
   local driver; driver="$(ask_default "Choose Minikube driver (docker/podman/none)" "$suggested")"
   case "$driver" in
@@ -215,15 +270,17 @@ minikube_driver_setup() {
     *) echo "Unknown driver '$driver'. Using '$suggested'."; driver="$suggested" ;;
   esac
 
-  # Ask for resources (defaults: 2 CPUs, 4 GB)
+  # If docker driver, ensure current shell can access Docker
+  if [[ "$driver" == "docker" ]]; then
+    ensure_docker_access
+  fi
+
   local cpus mem
   cpus="$(ask_default "CPUs for Minikube" "2")"
   mem="$(ask_default "Memory (MB) for Minikube" "4096")"
 
-  # Build start command
   local cmd=(minikube start --driver="${driver}" --cpus="${cpus}" --memory="${mem}")
   if [[ "$driver" == "podman" ]]; then
-    # Prefer CRI-O with podman, optional
     cmd+=(--container-runtime=cri-o)
   fi
 
@@ -233,7 +290,6 @@ minikube_driver_setup() {
   echo "Minikube status:"
   minikube status || true
 
-  # Ensure kubectl context is set
   if command -v kubectl >/dev/null 2>&1; then
     kubectl config use-context minikube >/dev/null 2>&1 || true
     echo "kubectl current-context: $(kubectl config current-context || echo 'unknown')"
@@ -274,7 +330,6 @@ install_or_configure_git() {
   sudo apt-get install -y git
 
   echo "Configuring Git user settings (global)..."
-  # Pre-fill defaults from existing config if present
   local cur_name cur_email cur_branch
   cur_name="$(git config --global user.name || true)"
   cur_email="$(git config --global user.email || true)"
@@ -289,7 +344,6 @@ install_or_configure_git() {
   git config --global user.email "$email"
   git config --global init.defaultBranch "$branch"
 
-  # Sensible quality-of-life defaults
   git config --global pull.rebase false
   git config --global push.default simple
   git config --global core.editor "${EDITOR:-nano}"
@@ -297,7 +351,6 @@ install_or_configure_git() {
   echo "Git configured:"
   git config --global --list | sed 's/^/  /'
 
-  # Offer to generate an SSH key for Git hosting
   if yes_no "Generate a new SSH key for Git (ed25519) and show its public key? (y/n):"; then
     require ssh-keygen openssh-client
     local email_for_key="${email:-$USER@$(hostname -f 2>/dev/null || hostname)}"
